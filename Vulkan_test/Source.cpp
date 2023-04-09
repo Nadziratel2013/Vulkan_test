@@ -15,6 +15,7 @@
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
+const int MAX_FRAMES_IN_FLIGHT = 2; //определяет сколько кадров должно обрабатываться одновременно 
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -97,11 +98,12 @@ private:
     VkPipeline graphicsPipeline;
 
     VkCommandPool commandPool; //пул команд, управляющий памятью, используемой для хранения буферов, из которых выделяются буферы команд
-    VkCommandBuffer commandBuffer; //для них не нужна очистка, тк они будут очищены при удалении их пула комманд
+    std::vector <VkCommandBuffer> commandBuffers; //для них не нужна очистка, тк они будут очищены при удалении их пула комманд
      
-    VkSemaphore imageAvailableSemaphore; //семафор, сигнализирующий о том, что изображение было получено из свап чейна и готово к рендерингу
-    VkSemaphore renderFinishedSemaphore; //семафор, сигнализирующий о том, что рендеринг завершен и можно выводить картинку (может произойти презентация)
-    VkFence inFlightFence; //fence, чтобы убедиться, что за раз рендерится только 1  кадр
+    std::vector <VkSemaphore> imageAvailableSemaphores; //семафор, сигнализирующий о том, что изображение было получено из свап чейна и готово к рендерингу
+    std::vector <VkSemaphore> renderFinishedSemaphores; //семафор, сигнализирующий о том, что рендеринг завершен и можно выводить картинку (может произойти презентация)
+    std::vector <VkFence> inFlightFences; //fence, чтобы убедиться, что за раз рендерится только 1  кадр
+    uint32_t currentFrame = 0; //иднекс кадра (для отслеживания текущего кадра)
 
     void initWindow() {
         glfwInit();
@@ -124,7 +126,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();//создаем фреймбуфер сразу после конвейера  
         createCommandPool();
-        createCommandBuffer();
+        createCommandBuffers();
         createSyncObjects(); //создание семафоров
     }
 
@@ -138,9 +140,11 @@ private:
     }
 
     void cleanup() {
-        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
-        vkDestroyFence(device, inFlightFence, nullptr);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
+        }
 
         vkDestroyCommandPool(device, commandPool, nullptr);
         for (auto framebuffer : swapChainFramebuffers) { //удаляем фреймбуферы before the image views and render pass that they are based on, but only after we've finished rendering
@@ -170,7 +174,7 @@ private:
         glfwTerminate();
     }
 
-    void createInstance() { // 
+    void createInstance() {
         if (enableValidationLayers && !checkValidationLayerSupport()) {
             throw std::runtime_error("validation layers requested, but not available!");
         }
@@ -594,14 +598,15 @@ private:
         }
     }
 
-    void createCommandBuffer() { 
+    void createCommandBuffers() { 
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         VkCommandBufferAllocateInfo allocInfo{}; //требуется указать пул комманд и количество выделяемых буферов
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
+        allocInfo.commandBufferCount = (uint32_t) commandBuffers.size();
 
-        if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+        if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
         }
     }
@@ -656,6 +661,10 @@ private:
     }
 
     void createSyncObjects() {
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
         VkSemaphoreCreateInfo semaphoreInfo{}; //создаем семафор
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
@@ -663,30 +672,32 @@ private:
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; //фенс изначально в сиганальном состоянии, чтобы сразу же вернуться. Нужно потому что первый кадр не рендерится из-за выключенного сигнала забора
 
-        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS || vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create semaphores!");
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS || vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create semaphores!");
+            }
         }
     }
 
     void drawFrame() {
-        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX); //ожидаем завершения предыдущего кадра, чтобы буфер команд и семафоры были доступны для использования
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX); //ожидаем завершения предыдущего кадра, чтобы буфер команд и семафоры были доступны для использования
         //функция vkWaitForFences принимает массив fences и ожидает на хосте, пока не будут переданы какие-либо или все ограждения. VK_TRUE - хотим дождаться всех ограждений, UINT64_MAX - тайм-аут с заданным максимальным значением 64-битного целого числа, что отключает тайм-аут
-        vkResetFences(device, 1, &inFlightFence); //сброс забора в несигнальное состояние
+        vkResetFences(device, 1, &inFlightFences[currentFrame]); //сброс забора в несигнальное состояние
         //получение изображения из цепочки обмена
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex); 
+        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
         //Первые два параметра — vkAcquireNextImageKHRэто логическое устройство и цепочка обмена, из которой мы хотим получить образ. Третий параметр указывает тайм-аут в наносекундах для того, чтобы изображение стало доступным. Использование максимального значения 64-битного целого числа без знака означает, что мы эффективно отключаем тайм-аут.
         //Следующие два параметра задают объекты синхронизации, которые должны сигнализироваться, когда механизм представления завершает использование изображения.Это момент времени, когда мы можем начать рисовать.Можно указать семафор, забор или и то, и другое.Мы собираемся использовать наш imageAvailableSemaphoreдля этой цели здесь.
         //Последний параметр задает переменную для вывода индекса ставшего доступным образа цепочки обмена.Индекс ссылается на VkImageв нашем swapChainImagesмассиве.Мы собираемся использовать этот индекс для выбора файла VkFrameBuffer.
          
         //очищаем буфер команд, чтобы убедиться, что он может быть записан
-        vkResetCommandBuffer(commandBuffer, 0); // 0 - это флаг
-        recordCommandBuffer(commandBuffer, imageIndex); //запишем нужные команды
+        vkResetCommandBuffer(commandBuffers[currentFrame], 0); // 0 - это флаг
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex); //запишем нужные команды
 
         VkSubmitInfo submitInfo{}; //отправка очереди и синхронизация
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+        
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
@@ -695,14 +706,14 @@ private:
         
         //указывает какие командные буферы даются для выполнения
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
+        submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
         //определяют, какие семафоры будут сигнализировать после завершения выполнения командного буфера
-        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
-        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
             throw std::runtime_error("failed to submit draw command buffer!");
         }
         //настройка представления
@@ -720,6 +731,7 @@ private:
 
         vkQueuePresentKHR(presentQueue, &presentInfo); //отправляет запрос на представление изображения в свап чейн
 
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT; //переход к следующему кадру. Используя оператор по модулю (%), мы гарантируем, что индекс кадра зацикливается после каждого MAX_FRAMES_IN_FLIGHTпоставленного в очередь кадра.
     }
 
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
