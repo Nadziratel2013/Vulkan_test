@@ -12,6 +12,8 @@
 #include <optional>
 #include <set>
 #include <fstream> 
+#include <glm/glm.hpp> //библиотека glm, дающая доступ к типам, связанным с линейной алгеброй
+#include<array>
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -64,6 +66,42 @@ struct SwapChainSupportDetails {
     std::vector<VkPresentModeKHR> presentModes;
 };
 
+struct Vertex {
+    glm::vec2 pos;
+    glm::vec3 color;
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0; //иднекс привязки в массиве привязок
+        bindingDescription.stride = sizeof(Vertex); //количество байт от  одной записи к другой 
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX; //переход к следующей записи данных после каждой вершины
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() { //описывает как обрабатывать входные  данные 
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+        attributeDescriptions[0].binding = 0; //сообщает из какой привязки поступает данные для каждой вершины
+        attributeDescriptions[0].location = 0; //ссылка на location в вершинном шейдере
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT; //неявно определяет размер данных атрибута в байтах (float 64 байта)
+        attributeDescriptions[0].offset = offsetof(Vertex, pos); //указывает количество байтов с начала данных каждой вершины для чтения
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(Vertex, color);
+
+        return attributeDescriptions;
+    }
+
+};
+
+const std::vector<Vertex> vertices = { //массив данных вершин
+    {{0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 0.0f, 1.0f}}
+};
+
+
 class HelloTriangleApplication {
 public:
     void run() {
@@ -95,7 +133,9 @@ private:
 
     VkRenderPass renderPass; 
     VkPipelineLayout pipelineLayout;
-    VkPipeline graphicsPipeline;
+    VkPipeline graphicsPipeline; 
+    VkBuffer vertexBuffer;
+    VkDeviceMemory vertexBufferMemory;
 
     VkCommandPool commandPool; //пул команд, управляющий памятью, используемой для хранения буферов, из которых выделяются буферы команд
     std::vector <VkCommandBuffer> commandBuffers; //для них не нужна очистка, тк они будут очищены при удалении их пула комманд
@@ -134,6 +174,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();//создаем фреймбуфер сразу после конвейера  
         createCommandPool();
+        createVertexBuffer();
         createCommandBuffers();
         createSyncObjects(); //создание семафоров
     }
@@ -149,6 +190,8 @@ private:
 
     void cleanup() {
         cleanupSwapChain();
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -489,10 +532,12 @@ private:
         //структура, описывающая формат данных вершин, которые  будут переданы вершинному шейдеру
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.pVertexBindingDescriptions = nullptr; //указывают на массив структур, которые описывают детали для загрузки данных вершин
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
-        vertexInputInfo.pVertexAttributeDescriptions = nullptr; //указывают на массив структур, которые описывают детали для загрузки данных вершин
+        auto bindingDescription = Vertex::getBindingDescription();
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription; //указывают на массив структур, которые описывают детали для загрузки данных вершин
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data(); //указывают на массив структур, которые описывают детали для загрузки данных вершин
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{}; //структура описывает геометрию, которая будет нарисована из вершин и нужжжно ли перезапуск примитивов
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -619,6 +664,52 @@ private:
         }
     }
 
+    void createVertexBuffer() {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeof(vertices[0]) * vertices.size(); //размер буфера в байтах
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; //указывает для каких целей будут использоваться данные в буфере
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        bufferInfo.flags = 0; //используется для настройки разряженной буферной памяти
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create vertex buffer!");
+        }
+
+        VkMemoryRequirements memRequirements; //выдление памяти для буфера
+        vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate vertex buffer memory!");
+        }
+
+        vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0); //связь выделенной памячти с буфером
+
+        //заполнение буфера вершин. Делается  путем сопоставления буферной памяти, с памятью доступной  ЦП
+        void* data;
+        vkMapMemory(device, vertexBufferMemory, 0, bufferInfo.size, 0, &data); //позволяет получить доступ к области указанного ресурса памяти, определяемого смещением (=0) и размером (bufferInfo.size). Спец значение VK_WHOLE_SIZE нужно для отображения  всей памяти. Предпоследний параметр нужен для флагов ( в данной версии 0), последний параметр определяет вывод указателя на отображаемую память
+            memcpy(data, vertices.data(), (size_t) bufferInfo.size); //копирует данные вершин и переносит их в отображаемую память
+        vkUnmapMemory(device, vertexBufferMemory);
+
+    }
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) { //поиск типа памяти, подходящего для буфера
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+        throw std::runtime_error("failed to find suitable memory type!");
+    }
+
     void createCommandPool() {
         QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice); //подключаем семейство очередей
         VkCommandPoolCreateInfo poolInfo{};
@@ -667,9 +758,7 @@ private:
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE); //параметры: 1 - буфер, когда записывается команда, 2 - детали прохода рендеринга, 3 - представление команд в проходе  рендеринга (у нас команды передачи рендеринга встроены в сам первичный буфер, а вторичные буферы выполняться не будут)
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline); //привязываем графический конвейер. 2 параметр указывает, является ли объект конвейера графическим или вычислительным шейдером
-        //устанавливаем viewport и scissor state 
-
+       
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -684,13 +773,20 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0); //параметры 2 - vertexCount, 3 - instanceCoune (1, если не делаем), 4 - смещение в буфере вершиин, 5 - firstInstance
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline); //привязываем графический конвейер. 2 параметр указывает, является ли объект конвейера графическим или вычислительным шейдером
+        //устанавливаем viewport и scissor state 
+        VkBuffer vertexBuffers[] = { vertexBuffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0); //параметры 2 - vertexCount, 3 - instanceCoune (1, если не делаем), 4 - смещение в буфере вершиин, 5 - firstInstance
 
         vkCmdEndRenderPass(commandBuffer);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
         }
+
     }
 
     void createSyncObjects() {
